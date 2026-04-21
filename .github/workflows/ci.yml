@@ -1,0 +1,176 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop, nexflow-* ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  BUILD_TYPE: Debug
+
+jobs:
+  # Job 1: Linting
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install clang-format
+      run: sudo apt-get install -y clang-format-15 clang-tidy-15
+    
+    - name: Run linting
+      run: |
+        sudo ln -sf /usr/bin/clang-format-15 /usr/bin/clang-format
+        sudo ln -sf /usr/bin/clang-tidy-15 /usr/bin/clang-tidy
+        ./scripts/lint.sh
+
+  # Job 2: Build
+  build:
+    runs-on: ubuntu-22.04
+    needs: lint
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++-11 libssl-dev lcov
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
+    
+    - name: Configure
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+    
+    - name: Build
+      run: |
+        cd build
+        make -j $(nproc)
+
+  # Job 3: Unit Tests
+  unit-tests:
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++-11 libssl-dev
+    
+    - name: Configure and Build
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        make -j $(nproc)
+    
+    - name: Run unit tests
+      run: |
+        cd build
+        ctest --output-on-failure -R unit
+
+  # Job 4: Code Coverage (100% enforcement)
+  coverage:
+    runs-on: ubuntu-22.04
+    needs: unit-tests
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++-11 libssl-dev lcov bc
+    
+    - name: Run coverage
+      run: |
+        mkdir -p build-coverage
+        cd build-coverage
+        cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
+        make -j $(nproc)
+        ./tests/nexflow_tests
+        lcov --capture --directory . --output-file coverage.info --no-external
+        lcov --remove coverage.info '/usr/*' '*/tests/*' --output-file coverage-filtered.info
+        COVERAGE=$(lcov --summary coverage-filtered.info 2>&1 | grep "lines" | awk '{print $2}' | sed 's/%//')
+        echo "Coverage: ${COVERAGE}%"
+        if (( $(echo "$COVERAGE < 100" | bc -l) )); then
+          echo "❌ Coverage is ${COVERAGE}%, but 100% required"
+          exit 1
+        fi
+        echo "✅ Coverage is ${COVERAGE}%"
+    
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: build-coverage/coverage-filtered.info
+
+  # Job 5: Security Scan
+  security:
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Upload Trivy results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Job 6: Build Docker Image
+  docker:
+    runs-on: ubuntu-22.04
+    needs: [unit-tests, security]
+    if: github.event_name == 'push'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: containers/nexflow-data-plane/Dockerfile
+        push: false
+        tags: nexflow/data-plane:test
+        load: true
+    
+    - name: Test Docker image
+      run: |
+        docker run --rm nexflow/data-plane:test --version
+
+  # Job 7: Integration Tests
+  integration:
+    runs-on: ubuntu-22.04
+    needs: docker
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Start test environment
+      run: |
+        docker-compose -f docker-compose.test.yml up -d
+        sleep 10
+    
+    - name: Run integration tests
+      run: |
+        cd build
+        ctest --output-on-failure -R integration
+    
+    - name: Stop test environment
+      run: |
+        docker-compose -f docker-compose.test.yml down
