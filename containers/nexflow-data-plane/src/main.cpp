@@ -12,7 +12,6 @@ int main(int argc, char* argv[]) {
         std::cout << "nexflow-tunnel data plane version " << VERSION << std::endl;
         return 0;
     }
-    
     std::cout << "nexflow-tunnel data plane started" << std::endl;
     return 0;
 }
