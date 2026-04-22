@@ -26,17 +26,27 @@ jobs:
     needs: lint
     steps:
     - uses: actions/checkout@v4
+    
+    - name: Cache apt packages
+      uses: actions/cache@v4
+      with:
+        path: /var/cache/apt/archives
+        key: ${{ runner.os }}-apt-${{ hashFiles('**/CMakeLists.txt') }}
+    
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y cmake g++-11 libssl-dev
+    
     - name: Configure
       run: |
         mkdir -p build
         cd build
         cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+    
     - name: Build
       run: |
         cd build
         make -j $(nproc)
+    
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -61,12 +71,6 @@ jobs:
       run: |
         cd build
         ctest --output-on-failure -R unit
-    - name: Upload test results
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-results
-        path: build/Testing/Temporary/
-        retention-days: 7
 
   security:
     runs-on: ubuntu-22.04
@@ -91,11 +95,20 @@ jobs:
   docker:
     runs-on: ubuntu-22.04
     needs: [unit-tests, security]
-    # No if condition - runs on both push and pull_request
     steps:
     - uses: actions/checkout@v4
+    
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+    
+    - name: Cache Docker layers
+      uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+    
     - name: Build Docker image
       uses: docker/build-push-action@v5
       with:
@@ -104,12 +117,26 @@ jobs:
         push: false
         tags: nexflow/data-plane:test
         load: true
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+    
     - name: Test Docker image
       run: |
         docker run --rm nexflow/data-plane:test --version
+    
+    - name: Save Docker image
+      run: |
+        docker save nexflow/data-plane:test -o nexflow-data-plane.tar
+        gzip nexflow-data-plane.tar
+    
     - name: Upload Docker image
       uses: actions/upload-artifact@v4
       with:
         name: docker-image
-        path: /tmp/nexflow-data-plane.tar.gz
+        path: nexflow-data-plane.tar.gz
         retention-days: 7
+    
+    - name: Move Docker cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
