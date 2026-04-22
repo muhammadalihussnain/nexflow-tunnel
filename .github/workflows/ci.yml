@@ -91,7 +91,7 @@ jobs:
   docker:
     runs-on: ubuntu-22.04
     needs: [unit-tests, security]
-    if: github.event_name == 'push'
+    # No if condition - runs on both push and pull_request
     steps:
     - uses: actions/checkout@v4
     - name: Set up Docker Buildx
