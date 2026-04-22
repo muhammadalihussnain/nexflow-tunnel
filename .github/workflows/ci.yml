@@ -1,0 +1,204 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, develop, nexflow-* ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  BUILD_TYPE: Debug
+  # Force Node.js 24 for all JavaScript actions (removes deprecation warnings)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # Job 1: Linting
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install clang-format
+      run: sudo apt-get install -y clang-format-15
+    
+    - name: Run linting
+      run: |
+        sudo ln -sf /usr/bin/clang-format-15 /usr/bin/clang-format
+        ./scripts/lint.sh
+
+  # Job 2: Build
+  build:
+    runs-on: ubuntu-22.04
+    needs: lint
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Cache build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          build/
+          ~/.cache/ccache
+        key: ${{ runner.os }}-build-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-build-
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++-11 libssl-dev ccache
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-11 100
+    
+    - name: Configure
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+    
+    - name: Build
+      run: |
+        cd build
+        make -j $(nproc)
+    
+    - name: Upload build artifacts (optional)
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-output
+        path: build/
+        retention-days: 7
+
+  # Job 3: Unit Tests
+  unit-tests:
+    runs-on: ubuntu-22.04
+    needs: build
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Cache build artifacts
+      uses: actions/cache@v4
+      with:
+        path: build/
+        key: ${{ runner.os }}-build-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-build-
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake g++-11 libssl-dev
+    
+    - name: Configure and Build
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        make -j $(nproc)
+    
+    - name: Run unit tests
+      run: |
+        cd build
+        ctest --output-on-failure -R unit
+    
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: build/Testing/Temporary/
+        retention-days: 7
+
+  # Job 4: Security Scan
+    security:
+    runs-on: ubuntu-22.04
+    needs: build
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scan
+      uses: aquasecurity/trivy-action@0.29.0  # Changed from 0.28.0
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'
+    
+    - name: Upload Trivy results
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # Job 5: Build Docker Image
+  docker:
+    runs-on: ubuntu-22.04
+    needs: [unit-tests, security]
+    if: github.event_name == 'push'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Cache Docker layers
+      uses: actions/cache@v4
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+    
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: containers/nexflow-data-plane/Dockerfile
+        push: false
+        tags: nexflow/data-plane:test
+        load: true
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+    
+    - name: Test Docker image
+      run: |
+        docker run --rm nexflow/data-plane:test --version
+    
+    - name: Save Docker image as artifact
+      run: |
+        docker save nexflow/data-plane:test -o nexflow-data-plane.tar
+        gzip nexflow-data-plane.tar
+    
+    - name: Upload Docker artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-image
+        path: nexflow-data-plane.tar.gz
+        retention-days: 7
+    
+    # Move cache to final location (for next run)
+    - name: Move cache
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+  # Job 6: Notify on failure (optional)
+    notify-failure:
+    runs-on: ubuntu-22.04
+    needs: [lint, build, unit-tests, security, docker]
+    if: always() && failure()
+    permissions:
+      issues: write  # ADD THIS LINE
+    steps:
+    - name: Create issue on failure
+      uses: actions/github-script@v7
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `CI Pipeline Failed - ${context.sha}`,
+            body: `The CI pipeline failed for commit ${context.sha}. Check the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
+          })

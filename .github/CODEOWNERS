@@ -1,0 +1,11 @@
+# Default owners for everything
+* @muhammadalihussnain
+
+# Container A owners
+/containers/nexflow-data-plane/ @muhammadalihussnain
+
+# Documentation owners
+/docs/ @muhammadalihussnain
+
+# CI/CD owners
+/.github/workflows/ @muhammadalihussnain

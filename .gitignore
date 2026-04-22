@@ -1,0 +1,55 @@
+# Build directories
+build/
+cmake-build-*/
+build-*/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled files
+*.o
+*.obj
+*.so
+*.a
+*.dll
+*.exe
+*.out
+
+# Test artifacts
+coverage/
+*.gcda
+*.gcno
+*.gcov
+htmlcov/
+.coverage
+
+# Docker
+*.log
+*.pid
+
+# Secrets
+*.pem
+*.key
+*.crt
+*.csr
+.env
+.env.local
+.secrets/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+
+# Dependency directories
+vcpkg/
+conan/
