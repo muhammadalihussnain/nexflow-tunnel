@@ -27,9 +27,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake g++-11 libssl-dev
+      run: sudo apt-get update && sudo apt-get install -y cmake g++-11 libssl-dev
     - name: Configure
       run: |
         mkdir -p build
@@ -45,6 +43,14 @@ jobs:
     needs: build
     steps:
     - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y cmake g++-11 libssl-dev
+    - name: Configure and Build
+      run: |
+        mkdir -p build
+        cd build
+        cmake .. -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        make -j $(nproc)
     - name: Run unit tests
       run: |
         cd build
